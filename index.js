@@ -8,7 +8,11 @@ const {
   SlashCommandBuilder,
   EmbedBuilder,
   PermissionsBitField,
-  Events
+  Events,
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
+  StringSelectMenuBuilder
 } = require("discord.js");
 const { Pool } = require("pg");
 const instances = require("./instances");
@@ -36,9 +40,9 @@ const pool = new Pool({
   `);
 
   await pool.query(`
-    CREATE TABLE IF NOT EXISTS config_roles (
-      roleId TEXT PRIMARY KEY
-    )
+   CREATE TABLE IF NOT EXISTS kill_counter_roles (
+  roleId TEXT PRIMARY KEY
+)
   `);
 
   console.log("✅ PostgreSQL ready");
@@ -51,15 +55,50 @@ async function hasPermission(member) {
   if (member.permissions.has(PermissionsBitField.Flags.Administrator))
     return true;
 
-  const result = await pool.query("SELECT roleId FROM config_roles");
+ const result = await pool.query("SELECT roleId FROM kill_counter_roles");
   const allowedRoles = result.rows.map(r => r.roleid);
 
   return member.roles.cache.some(r => allowedRoles.includes(r.id));
 }
 
+/* ================= COMPONENTS ================= */
+
+function buildComponents(instanceName) {
+
+  const bosses = instances[instanceName];
+
+  const selectMenu = new StringSelectMenuBuilder()
+    .setCustomId(`select_${instanceName}`)
+    .setPlaceholder("Sélectionner un boss")
+    .addOptions(
+      bosses.slice(0, 25).map(boss => ({
+        label: boss,
+        value: boss
+      }))
+    );
+
+  const buttons = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`add_${instanceName}`)
+      .setLabel("➕")
+      .setStyle(ButtonStyle.Success),
+
+    new ButtonBuilder()
+      .setCustomId(`remove_${instanceName}`)
+      .setLabel("➖")
+      .setStyle(ButtonStyle.Danger)
+  );
+
+  return [
+    new ActionRowBuilder().addComponents(selectMenu),
+    buttons
+  ];
+}
+
 /* ================= EMBED ================= */
 
 async function buildEmbed(instanceName) {
+
 
   const result = await pool.query(
     "SELECT * FROM kill_counter WHERE instance = $1",
@@ -197,7 +236,10 @@ client.on(Events.InteractionCreate, async interaction => {
       }
 
       const embed = await buildEmbed(instanceName);
-      const message = await channel.send({ embeds: [embed] });
+  const message = await channel.send({
+  embeds: [embed],
+  components: buildComponents(instanceName)
+});
 
       await pool.query(
         "UPDATE kill_counter SET messageId = $1 WHERE instance = $2",
@@ -246,7 +288,7 @@ client.on(Events.InteractionCreate, async interaction => {
   if (commandName === "addrole") {
     const role = interaction.options.getRole("role");
     await pool.query(
-      `INSERT INTO config_roles (roleId)
+      `INSERT INTO kill_counter_roles (roleId)
        VALUES ($1)
        ON CONFLICT DO NOTHING`,
       [role.id]
@@ -257,7 +299,7 @@ client.on(Events.InteractionCreate, async interaction => {
   if (commandName === "removerole") {
     const role = interaction.options.getRole("role");
     await pool.query(
-      "DELETE FROM config_roles WHERE roleId = $1",
+      "DELETE FROM kill_counter_roles WHERE roleId = $1",
       [role.id]
     );
     return interaction.editReply("✅ Rôle retiré.");
@@ -270,5 +312,86 @@ client.on(Events.InteractionCreate, async interaction => {
 const app = express();
 app.get("/", (req, res) => res.send("Bot running ✅"));
 app.listen(process.env.PORT || 10000, "0.0.0.0");
+
+client.on(Events.InteractionCreate, async interaction => {
+
+  if (!interaction.isStringSelectMenu() && !interaction.isButton())
+    return;
+
+  const member = interaction.member;
+
+  if (!await hasPermission(member)) {
+    return interaction.reply({
+      content: "❌ Permission refusée.",
+      ephemeral: true
+    });
+  }
+
+  /* ===== SELECT MENU ===== */
+
+  if (interaction.isStringSelectMenu()) {
+
+    const [_, instanceName] = interaction.customId.split("_");
+    const selectedBoss = interaction.values[0];
+
+    interaction.client.selectedBoss = {
+      instance: instanceName,
+      boss: selectedBoss,
+      user: interaction.user.id
+    };
+
+    return interaction.reply({
+      content: `Boss sélectionné : **${selectedBoss}**`,
+      ephemeral: true
+    });
+  }
+
+  /* ===== BUTTONS ===== */
+
+  if (interaction.isButton()) {
+
+    const [action, instanceName] = interaction.customId.split("_");
+
+    const selected = interaction.client.selectedBoss;
+
+    if (!selected ||
+        selected.user !== interaction.user.id ||
+        selected.instance !== instanceName) {
+      return interaction.reply({
+        content: "❌ Sélectionne d'abord un boss.",
+        ephemeral: true
+      });
+    }
+
+    const delta = action === "add" ? 1 : -1;
+
+    await pool.query(
+      `UPDATE kill_counter
+       SET kills = GREATEST(kills + $1, 0)
+       WHERE instance = $2 AND boss = $3`,
+      [delta, instanceName, selected.boss]
+    );
+
+    const result = await pool.query(
+      "SELECT messageId FROM kill_counter WHERE instance = $1 LIMIT 1",
+      [instanceName]
+    );
+
+    const messageId = result.rows[0]?.messageid;
+    const message = await interaction.channel.messages.fetch(messageId);
+
+    const updatedEmbed = await buildEmbed(instanceName);
+
+    await message.edit({
+      embeds: [updatedEmbed],
+      components: buildComponents(instanceName)
+    });
+
+    return interaction.reply({
+      content: "✅ Compteur mis à jour.",
+      ephemeral: true
+    });
+  }
+});
 
 client.login(process.env.TOKEN);
