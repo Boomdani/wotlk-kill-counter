@@ -9,10 +9,6 @@ const {
   EmbedBuilder,
   PermissionsBitField,
   Events,
-  ActionRowBuilder,
-  ButtonBuilder,
-  ButtonStyle,
-  StringSelectMenuBuilder
 } = require("discord.js");
 const { Pool } = require("pg");
 const instances = require("./instances");
@@ -61,39 +57,7 @@ async function hasPermission(member) {
   return member.roles.cache.some(r => allowedRoles.includes(r.id));
 }
 
-/* ================= COMPONENTS ================= */
 
-function buildComponents(instanceName) {
-
-  const bosses = instances[instanceName];
-
-  const selectMenu = new StringSelectMenuBuilder()
-    .setCustomId(`select_${instanceName}`)
-    .setPlaceholder("Sélectionner un boss")
-    .addOptions(
-      bosses.slice(0, 25).map(boss => ({
-        label: boss,
-        value: boss
-      }))
-    );
-
-  const buttons = new ActionRowBuilder().addComponents(
-    new ButtonBuilder()
-      .setCustomId(`add_${instanceName}`)
-      .setLabel("➕")
-      .setStyle(ButtonStyle.Success),
-
-    new ButtonBuilder()
-      .setCustomId(`remove_${instanceName}`)
-      .setLabel("➖")
-      .setStyle(ButtonStyle.Danger)
-  );
-
-  return [
-    new ActionRowBuilder().addComponents(selectMenu),
-    buttons
-  ];
-}
 
 /* ================= EMBED ================= */
 
@@ -236,9 +200,8 @@ client.on(Events.InteractionCreate, async interaction => {
       }
 
       const embed = await buildEmbed(instanceName);
-  const message = await channel.send({
-  embeds: [embed],
-  components: buildComponents(instanceName)
+ const message = await channel.send({
+  embeds: [embed]
 });
 
       await pool.query(
@@ -313,85 +276,6 @@ const app = express();
 app.get("/", (req, res) => res.send("Bot running ✅"));
 app.listen(process.env.PORT || 10000, "0.0.0.0");
 
-client.on(Events.InteractionCreate, async interaction => {
 
-  if (!interaction.isStringSelectMenu() && !interaction.isButton())
-    return;
-
-  const member = interaction.member;
-
-  if (!await hasPermission(member)) {
-    return interaction.reply({
-      content: "❌ Permission refusée.",
-      ephemeral: true
-    });
-  }
-
-  /* ===== SELECT MENU ===== */
-
-  if (interaction.isStringSelectMenu()) {
-
-    const [_, instanceName] = interaction.customId.split("_");
-    const selectedBoss = interaction.values[0];
-
-    interaction.client.selectedBoss = {
-      instance: instanceName,
-      boss: selectedBoss,
-      user: interaction.user.id
-    };
-
-    return interaction.reply({
-      content: `Boss sélectionné : **${selectedBoss}**`,
-      ephemeral: true
-    });
-  }
-
-  /* ===== BUTTONS ===== */
-
-  if (interaction.isButton()) {
-
-    const [action, instanceName] = interaction.customId.split("_");
-
-    const selected = interaction.client.selectedBoss;
-
-    if (!selected ||
-        selected.user !== interaction.user.id ||
-        selected.instance !== instanceName) {
-      return interaction.reply({
-        content: "❌ Sélectionne d'abord un boss.",
-        ephemeral: true
-      });
-    }
-
-    const delta = action === "add" ? 1 : -1;
-
-    await pool.query(
-      `UPDATE kill_counter
-       SET kills = GREATEST(kills + $1, 0)
-       WHERE instance = $2 AND boss = $3`,
-      [delta, instanceName, selected.boss]
-    );
-
-    const result = await pool.query(
-      "SELECT messageId FROM kill_counter WHERE instance = $1 LIMIT 1",
-      [instanceName]
-    );
-
-    const messageId = result.rows[0]?.messageid;
-    const message = await interaction.channel.messages.fetch(messageId);
-
-    const updatedEmbed = await buildEmbed(instanceName);
-
-    await message.edit({
-      embeds: [updatedEmbed],
-      components: buildComponents(instanceName)
-    });
-
-    return interaction.reply({
-      content: "✅ Compteur mis à jour.",
-      ephemeral: true
-    });
-  }
-});
 
 client.login(process.env.TOKEN);
